@@ -2,9 +2,8 @@ name: Digest diario de Blackboard
 
 on:
   schedule:
-    # 11:00 UTC = 7:00 AM en la costa este de EE. UU. durante el horario de verano (EDT).
-    # En invierno (EST) cae a las 6:00 AM. Si lo querés clavado a las 7, cambialo a 12
-    # cuando arranque el horario estandar en noviembre.
+    # 11:00 UTC = 7:00 AM costa este en verano (EDT). En invierno cae a las 6:00 AM:
+    # cambialo a "0 12 * * *" cuando entre el horario estandar en noviembre.
     - cron: "0 11 * * *"
   workflow_dispatch:
     inputs:
@@ -35,56 +34,59 @@ jobs:
         env:
           ICS_URL: ${{ secrets.ICS_URL }}
           ICS_URL_INPUT: ${{ inputs.ics_url }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          REPO_PLANTILLA: Hec-M12/bb-digest
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
         run: |
           faltan=""
           [ -n "$ICS_URL_INPUT" ] || [ -n "$ICS_URL" ] || faltan="$faltan ICS_URL"
-          [ -n "$TG_BOT_TOKEN" ] || faltan="$faltan TG_BOT_TOKEN"
-          [ -n "$TG_CHAT_ID" ] || faltan="$faltan TG_CHAT_ID"
+          [ -n "$GMAIL_USER" ] || faltan="$faltan GMAIL_USER"
+          [ -n "$GMAIL_APP_PASSWORD" ] || faltan="$faltan GMAIL_APP_PASSWORD"
+          [ -n "$GMAIL_TO" ] || faltan="$faltan GMAIL_TO"
           if [ -n "$faltan" ]; then
             echo "configurados=false" >> "$GITHUB_OUTPUT"
-            # Hec-M12/bb-digest es la PLANTILLA publica: no tiene secrets cargados
-            # a proposito, para no dejar credenciales en un repo abierto. Ahi la
-            # falta de secrets no es una falla, simplemente no hay nada que mandar.
-            if [ "$GITHUB_REPOSITORY" = "$REPO_PLANTILLA" ]; then
-              echo "::notice::No hay secrets configurados ($faltan ). No hay digest que mandar: esto es lo esperado en el repo plantilla. Tu fork corre con TUS secrets."
-              echo "Salteando el envio. Las pruebas igual corren, asi se ve que el codigo funciona."
-              exit 0
-            fi
-            # En el fork de un estudiante SI queremos el error rojo: es la senal
-            # de que falta el paso 2 del README (cargar los tres secrets).
             echo "::error::Faltan secrets:$faltan . Cargalos en Settings > Secrets and variables > Actions."
             exit 1
           fi
           echo "configurados=true" >> "$GITHUB_OUTPUT"
-          echo "Los tres estan cargados."
+          echo "Secrets OK."
 
       - name: Correr las pruebas
         run: python test_bb_digest.py
 
-      - name: Mandar el digest
+      - name: Mandar el digest por email
         if: steps.secrets.outputs.configurados == 'true'
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           ICS_URL: ${{ secrets.ICS_URL }}
           ICS_URL_INPUT: ${{ inputs.ics_url }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
         run: |
           url="${ICS_URL_INPUT:-$ICS_URL}"
-          python bb_digest.py --ics "$url" --days 7 --send telegram
+          python bb_digest.py --ics "$url" --days 7 > digest.txt
+          cat digest.txt
+          python - <<'EOF'
+          import os, smtplib
+          from email.message import EmailMessage
+          with open("digest.txt", encoding="utf-8") as f:
+              body = f.read()
+          msg = EmailMessage()
+          msg["Subject"] = "📚 Digest Blackboard"
+          msg["From"] = os.environ["GMAIL_USER"]
+          msg["To"] = os.environ["GMAIL_TO"]
+          msg.set_content(body)
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+              s.login(os.environ["GMAIL_USER"], os.environ["GMAIL_APP_PASSWORD"])
+              s.send_message(msg)
+          print("email enviado")
+          EOF
 
-  # GitHub apaga los workflows programados a los 60 dias sin actividad en el repo.
-  # Este job commitea .keepalive una vez por semana (lunes) para que el cron no muera.
-  # Nota: un push hecho con el GITHUB_TOKEN por diseno NO dispara otros workflows,
-  # asi que esto no arma un bucle.
   keepalive:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Tocar .keepalive los lunes
         run: |
           if [ "$(date -u +%u)" != "1" ]; then
@@ -92,7 +94,7 @@ jobs:
             exit 0
           fi
           date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .keepalive
           git diff --staged --quiet && { echo "Sin cambios."; exit 0; }
